@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    container_name: ciiic-automator
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "3000"
+    networks:
+      - slidecreator_default
+
+networks:
+  slidecreator_default:
+    external: true

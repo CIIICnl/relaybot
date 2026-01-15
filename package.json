@@ -1,0 +1,17 @@
+{
+  "name": "ciiic-automator",
+  "version": "1.0.0",
+  "description": "Email-to-Notion event relay server for CIIIC",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "openai": "^4.68.0"
+  }
+}
