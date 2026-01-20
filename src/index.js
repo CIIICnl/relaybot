@@ -201,6 +201,13 @@ function parseInboundEmail(body, headers) {
   // Log incoming format for debugging
   console.log('📬 Parsing email, keys:', Object.keys(body).join(', '));
 
+  // Brevo wraps emails in an "items" array - unwrap it
+  if (body.items && Array.isArray(body.items) && body.items.length > 0) {
+    console.log('📬 Brevo items wrapper detected, unwrapping...');
+    body = body.items[0];
+    console.log('📬 Unwrapped keys:', Object.keys(body).join(', '));
+  }
+
   // Brevo Inbound Parsing format
   if (body.Uuid || body.MessageId || (body.From && body.RawHtmlBody)) {
     const from = body.From?.Address || (typeof body.From === 'string' ? extractEmail(body.From) : '') || extractEmail(body.ReplyTo || '');
