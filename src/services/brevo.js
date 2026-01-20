@@ -119,6 +119,63 @@ Dit is een automatisch bericht van de CIIIC Event Bot.`;
 }
 
 /**
+ * Send newsletter item creation confirmation email
+ */
+export async function sendNewsletterItemConfirmation(recipientEmail, title, notionUrl, weekNumber, publicatieDatum) {
+  const subject = `✅ Nieuwsbrief item aangemaakt: ${title}`;
+
+  const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+  <h2>Nieuwsbrief item succesvol aangemaakt!</h2>
+  <p>Je item <strong>${escapeHtml(title)}</strong> is toegevoegd aan de content database.</p>
+  <ul style="color: #666;">
+    <li>Publicatiedatum: <strong>${publicatieDatum}</strong></li>
+    <li>Nieuwsbrief: <strong>Week ${weekNumber}</strong></li>
+  </ul>
+  <p>
+    <a href="${notionUrl}" style="display: inline-block; padding: 10px 20px; background-color: #000; color: #fff; text-decoration: none; border-radius: 4px;">
+      Bekijk in Notion
+    </a>
+  </p>
+  <p style="color: #666; font-size: 14px;">
+    Je kunt het item bewerken via de link hierboven.
+  </p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+  <p style="color: #999; font-size: 12px;">
+    Dit is een automatisch bericht van de CIIIC Bot.
+  </p>
+</body>
+</html>
+`;
+
+  const textContent = `Nieuwsbrief item succesvol aangemaakt!
+
+Je item "${title}" is toegevoegd aan de content database.
+
+- Publicatiedatum: ${publicatieDatum}
+- Nieuwsbrief: Week ${weekNumber}
+
+Bekijk in Notion: ${notionUrl}
+
+Je kunt het item bewerken via de link hierboven.
+
+---
+Dit is een automatisch bericht van de CIIIC Bot.`;
+
+  return sendEmail({
+    to: recipientEmail,
+    subject,
+    htmlContent,
+    textContent,
+  });
+}
+
+/**
  * Send error notification email
  */
 export async function sendErrorNotification(recipientEmail, errorMessage) {
