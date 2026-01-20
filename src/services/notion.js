@@ -311,6 +311,61 @@ export async function createContentItem(contentData) {
 }
 
 /**
+ * Creates an inbox item in the Notion inbox database (catch-all)
+ * @param {Object} inboxData - The inbox item data
+ * @returns {Object} - Created Notion page with URL
+ */
+export async function createInboxItem(inboxData) {
+  const {
+    name,
+    description,
+    url,
+  } = inboxData;
+
+  const properties = {
+    'Name': {
+      title: [
+        {
+          text: {
+            content: name || 'Inbox item',
+          },
+        },
+      ],
+    },
+  };
+
+  if (description) {
+    properties['Description'] = {
+      rich_text: [
+        {
+          text: {
+            content: description.substring(0, 2000),
+          },
+        },
+      ],
+    };
+  }
+
+  if (url) {
+    properties['URL'] = {
+      url: url,
+    };
+  }
+
+  const response = await notion.pages.create({
+    parent: {
+      database_id: INBOX_DATABASE_ID,
+    },
+    properties,
+  });
+
+  return {
+    id: response.id,
+    url: response.url,
+  };
+}
+
+/**
  * Add a comment to a Notion page
  * @param {string} pageId - The page ID to add the comment to
  * @param {string} comment - The comment text

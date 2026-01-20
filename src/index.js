@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
-import { parseEventFromEmail, parseNewsletterItemFromEmail } from './services/openai.js';
-import { createEvent, createContentItem, addComment, getNextThursday, getWeekNumber, testConnection as testNotion } from './services/notion.js';
+import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail } from './services/openai.js';
+import { createEvent, createContentItem, createInboxItem, addComment, getNextThursday, getWeekNumber, testConnection as testNotion } from './services/notion.js';
 import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, sendEmail, testConnection as testBrevo } from './services/brevo.js';
 
 const app = express();
@@ -18,13 +18,14 @@ app.get('/', (req, res) => {
     service: 'CIIIC Event Automator',
     description: 'Routes emails by recipient address',
     endpoints: {
-      'POST /webhook/email': 'Unified webhook - routes by recipient (events@ or nieuwsbriefitem@)',
+      'POST /webhook/email': 'Unified webhook - routes by recipient address',
       'POST /webhook/test': 'Test with raw content (use "to" field for routing)',
       'GET /health': 'Service health check with API status',
     },
     emailAddresses: {
-      'events@bot.ciiic.nl': 'Creates calendar events in Notion',
-      'nieuwsbriefitem@bot.ciiic.nl': 'Creates newsletter items in content database',
+      'events@bot.ciiic.nl': 'Creates calendar events',
+      'nieuwsbriefitem@bot.ciiic.nl': 'Creates newsletter items',
+      '*@bot.ciiic.nl': 'Catch-all → creates inbox items',
     },
   });
 });
@@ -95,8 +96,8 @@ app.post('/webhook/email', async (req, res) => {
         weekNumber: result.weekNumber,
         publicatieDatum: result.publicatieDatum,
       });
-    } else {
-      // Default: Event flow (events@bot.ciiic.nl or any other address)
+    } else if (recipient.includes('events@')) {
+      // Event flow
       console.log('📅 Routing to event handler');
       const result = await processEmail(from, subject, body);
 
@@ -105,6 +106,18 @@ app.post('/webhook/email', async (req, res) => {
         success: true,
         type: 'event',
         event: result.eventName,
+        notionUrl: result.notionUrl,
+      });
+    } else {
+      // Catch-all: Inbox flow
+      console.log('📥 Routing to inbox handler');
+      const result = await processInboxItem(from, subject, body);
+
+      console.log(`✅ Inbox item created: ${result.name}`);
+      return res.json({
+        success: true,
+        type: 'inbox',
+        name: result.name,
         notionUrl: result.notionUrl,
       });
     }
@@ -150,13 +163,23 @@ app.post('/webhook/test', async (req, res) => {
         publicatieDatum: result.publicatieDatum,
         parsedData: result.parsedData,
       });
-    } else {
-      // Event flow (default)
+    } else if (recipient.includes('events@')) {
+      // Event flow
       const result = await processEmail(senderEmail, subject, emailContent);
       res.json({
         success: true,
         type: 'event',
         event: result.eventName,
+        notionUrl: result.notionUrl,
+        parsedData: result.parsedData,
+      });
+    } else {
+      // Inbox flow (catch-all, also default for test without 'to')
+      const result = await processInboxItem(senderEmail, subject, emailContent);
+      res.json({
+        success: true,
+        type: 'inbox',
+        name: result.name,
         notionUrl: result.notionUrl,
         parsedData: result.parsedData,
       });
@@ -175,10 +198,15 @@ app.post('/webhook/test', async (req, res) => {
  * Returns: { from, to, subject, body }
  */
 function parseInboundEmail(body, headers) {
+  // Log incoming format for debugging
+  console.log('📬 Parsing email, keys:', Object.keys(body).join(', '));
+
   // Brevo Inbound Parsing format
   if (body.Uuid || body.MessageId || (body.From && body.RawHtmlBody)) {
+    const from = body.From?.Address || (typeof body.From === 'string' ? extractEmail(body.From) : '') || extractEmail(body.ReplyTo || '');
+    console.log('📬 Brevo format detected, From:', body.From, '→', from);
     return {
-      from: body.From?.Address || body.From || extractEmail(body.ReplyTo || ''),
+      from,
       to: extractEmail(body.To?.[0]?.Address || body.To?.[0] || body.To || ''),
       subject: body.Subject || '',
       body: body.RawTextBody || body.ExtractedMarkdownMessage || stripHtml(body.RawHtmlBody),
@@ -226,6 +254,7 @@ function parseInboundEmail(body, headers) {
   }
 
   // Fallback: try to find anything useful
+  console.log('📬 No format matched, using fallback. Body sample:', JSON.stringify(body).substring(0, 500));
   return {
     from: body.email || body.from_email || 'unknown',
     to: body.to || body.recipient || '',
@@ -238,8 +267,34 @@ function parseInboundEmail(body, headers) {
  * Extract email address from "Name <email@example.com>" format
  */
 function extractEmail(fromField) {
+  if (!fromField) return '';
   const match = fromField.match(/<([^>]+)>/);
   return match ? match[1] : fromField;
+}
+
+/**
+ * Get a friendly display name from an email address
+ * - For @ciiic.nl: returns first name (capitalized)
+ * - For others: returns the part before @ (capitalized)
+ */
+function getFriendlyName(email) {
+  if (!email || email === 'unknown') return 'Iemand';
+
+  const emailLower = email.toLowerCase();
+  const localPart = emailLower.split('@')[0];
+
+  // Capitalize first letter
+  const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  // For @ciiic.nl addresses, assume format is firstname@ciiic.nl
+  if (emailLower.includes('@ciiic.nl')) {
+    return capitalize(localPart);
+  }
+
+  // For other addresses, try to make it readable
+  // Replace dots/underscores with spaces and capitalize
+  const name = localPart.replace(/[._]/g, ' ').split(' ')[0];
+  return capitalize(name);
 }
 
 /**
@@ -290,9 +345,10 @@ async function processEmail(from, subject, body) {
 
   console.log(`✨ Created Notion page: ${notionPage.url}`);
 
-  // Build meta description and send Zapier notification
-  const forwarder = from.split('@')[0];
-  const eventDescription = `${forwarder} submitted an event: ${eventData.eventName}${eventData.eventDate ? ` on ${eventData.eventDate}` : ''}`;
+  // Build meta description and send Zapier notification (Dutch)
+  // Use LLM-extracted name, fallback to email parsing
+  const senderName = eventData.senderName || getFriendlyName(from);
+  const eventDescription = `${senderName} heeft een event ingediend: ${eventData.eventName}${eventData.eventDate ? ` op ${eventData.eventDate}` : ''}`;
   await sendZapierNotification('event', eventData.eventName, eventDescription, notionPage.url);
 
   // Send confirmation email
@@ -315,17 +371,19 @@ async function processEmail(from, subject, body) {
 }
 
 /**
- * Build a meta description of the newsletter item creation process
+ * Build a meta description of the newsletter item creation process (Dutch)
+ * Uses LLM-extracted names for accuracy
  */
 function buildMetaDescription(from, parsedData) {
-  const forwarder = from.split('@')[0]; // Get name/username part of email
-  const originalSender = parsedData.originalSender;
+  // Use LLM-extracted names, fallback to email parsing
+  const forwarder = parsedData.forwarderName || getFriendlyName(from);
+  const originalSender = parsedData.originalSenderName;
   const topic = parsedData.topicSummary || parsedData.title || 'een nieuwsbrief item';
 
   if (originalSender) {
-    return `${forwarder} forwarded a tip from ${originalSender} about ${topic}`;
+    return `${forwarder} heeft een tip doorgestuurd van ${originalSender} over ${topic}`;
   } else {
-    return `${forwarder} submitted a newsletter item about ${topic}`;
+    return `${forwarder} heeft een nieuwsbrief item ingediend over ${topic}`;
   }
 }
 
@@ -436,6 +494,54 @@ ${parsedData.url ? `URL: ${parsedData.url}` : ''}`.trim();
   };
 }
 
+/**
+ * Process inbox item from email (catch-all)
+ */
+async function processInboxItem(from, subject, body) {
+  const fullContent = subject
+    ? `Subject: ${subject}\n\n${body}`
+    : body;
+
+  console.log('🤖 Parsing inbox item with OpenAI...');
+
+  const parsedData = await parseInboxItemFromEmail(fullContent, from);
+
+  console.log('📝 Parsed inbox item data:', JSON.stringify(parsedData, null, 2));
+
+  const name = parsedData.name || subject || 'Inbox item';
+
+  console.log('📥 Creating Notion inbox item...');
+
+  const notionPage = await createInboxItem({
+    name,
+    description: parsedData.description,
+    url: parsedData.url,
+  });
+
+  console.log(`✨ Created Notion page: ${notionPage.url}`);
+
+  // Add a comment with context
+  const commentText = `📧 Ontvangen via e-mail
+Afzender: ${from}
+Onderwerp: ${subject || '(geen onderwerp)'}
+Datum: ${new Date().toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam' })}
+${parsedData.url ? `URL: ${parsedData.url}` : ''}`.trim();
+
+  await addComment(notionPage.id, commentText);
+
+  // Send Zapier notification (Dutch)
+  // Use LLM-extracted name, fallback to email parsing
+  const senderName = parsedData.senderName || getFriendlyName(from);
+  const inboxDescription = `${senderName} heeft een e-mail gestuurd: ${parsedData.description || subject || 'geen beschrijving'}`;
+  await sendZapierNotification('inbox', name, inboxDescription, notionPage.url);
+
+  return {
+    name,
+    notionUrl: notionPage.url,
+    parsedData,
+  };
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`
@@ -447,9 +553,10 @@ Endpoints:
   POST /webhook/email - Unified webhook (routes by recipient address)
   POST /webhook/test  - Test with raw content
 
-Email addresses (all route to /webhook/email):
-  events@bot.ciiic.nl          → Creates calendar events
-  nieuwsbriefitem@bot.ciiic.nl → Creates newsletter items + notifies Zapier
+Email routing (all send Zapier notifications):
+  events@bot.ciiic.nl          → Calendar events (type: event)
+  nieuwsbriefitem@bot.ciiic.nl → Newsletter items (type: newsletter-item)
+  *@bot.ciiic.nl               → Inbox catch-all (type: inbox)
 
 Configure your email service to POST all *@bot.ciiic.nl to:
   https://bot.ciiic.nl/webhook/email
