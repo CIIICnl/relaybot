@@ -204,10 +204,20 @@ function parseInboundEmail(body, headers) {
   // Brevo Inbound Parsing format
   if (body.Uuid || body.MessageId || (body.From && body.RawHtmlBody)) {
     const from = body.From?.Address || (typeof body.From === 'string' ? extractEmail(body.From) : '') || extractEmail(body.ReplyTo || '');
-    console.log('📬 Brevo format detected, From:', body.From, '→', from);
+    // Extract To - Brevo sends it in various formats
+    let to = '';
+    if (Array.isArray(body.To) && body.To.length > 0) {
+      to = body.To[0]?.Address || body.To[0] || '';
+    } else if (typeof body.To === 'string') {
+      to = body.To;
+    } else if (body.To?.Address) {
+      to = body.To.Address;
+    }
+    to = extractEmail(to);
+    console.log('📬 Brevo format detected, From:', body.From, '→', from, ', To:', body.To, '→', to);
     return {
       from,
-      to: extractEmail(body.To?.[0]?.Address || body.To?.[0] || body.To || ''),
+      to,
       subject: body.Subject || '',
       body: body.RawTextBody || body.ExtractedMarkdownMessage || stripHtml(body.RawHtmlBody),
     };
