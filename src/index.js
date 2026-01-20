@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail } from './services/openai.js';
-import { createEvent, createContentItem, createInboxItem, addComment, getNextThursday, getWeekNumber, testConnection as testNotion } from './services/notion.js';
-import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, sendEmail, testConnection as testBrevo } from './services/brevo.js';
+import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
+import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, testConnection as testBrevo } from './services/brevo.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -395,7 +395,12 @@ function buildMetaDescription(from, parsedData) {
  * @param {string} notionUrl - URL to the created Notion page
  */
 async function sendZapierNotification(type, title, description, notionUrl) {
-  const ZAPIER_WEBHOOK_URL = 'https://hooks.zapier.com/hooks/catch/23306921/uq2svjo/';
+  const ZAPIER_WEBHOOK_URL = process.env.ZAPIER_WEBHOOK_URL;
+
+  if (!ZAPIER_WEBHOOK_URL) {
+    console.log('⚠️ ZAPIER_WEBHOOK_URL not configured, skipping notification');
+    return;
+  }
 
   try {
     const response = await fetch(ZAPIER_WEBHOOK_URL, {
