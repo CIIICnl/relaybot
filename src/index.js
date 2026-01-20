@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail } from './services/openai.js';
+import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail, extractUrls, fetchUrlContent } from './services/openai.js';
 import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
 import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, testConnection as testBrevo } from './services/brevo.js';
 
@@ -453,10 +453,18 @@ async function processNewsletterItem(from, subject, body) {
     ? `Subject: ${subject}\n\n${body}`
     : body;
 
+  // Try to fetch content from URLs in the email for better context
+  let urlContent = null;
+  const urls = extractUrls(body || '');
+  if (urls.length > 0) {
+    console.log(`🔗 Found ${urls.length} URL(s), fetching first one: ${urls[0]}`);
+    urlContent = await fetchUrlContent(urls[0]);
+  }
+
   console.log('🤖 Parsing newsletter item with OpenAI...');
 
-  // Parse content with OpenAI
-  const parsedData = await parseNewsletterItemFromEmail(fullContent, from);
+  // Parse content with OpenAI, including URL content if available
+  const parsedData = await parseNewsletterItemFromEmail(fullContent, from, urlContent);
 
   console.log('📝 Parsed newsletter item data:', JSON.stringify(parsedData, null, 2));
 
