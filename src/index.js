@@ -3,6 +3,7 @@ import express from 'express';
 import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail, extractUrls, fetchUrlContent } from './services/openai.js';
 import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
 import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, testConnection as testBrevo } from './services/brevo.js';
+import { processRegistration, processStatusChange, processCheckin, verifySignature } from './services/jaarevent.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -571,6 +572,65 @@ ${parsedData.url ? `URL: ${parsedData.url}` : ''}`.trim();
     parsedData,
   };
 }
+
+// ==========================================
+// Jaarevent 2026 Registration Sync Endpoints
+// ==========================================
+
+/**
+ * New registration webhook from Gravity Forms
+ * Configure in GF → Settings → Webhooks → Request URL: https://bot.ciiic.nl/webhook/registration
+ */
+app.post('/webhook/registration', async (req, res) => {
+  console.log('📝 Received registration webhook');
+  try {
+    const result = await processRegistration(req.body);
+    console.log('✅ Registration processed:', JSON.stringify(result));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('❌ Registration error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * Registration status change webhook from GF mu-plugin
+ * Triggered when cancel link is clicked (status → cancelled)
+ */
+app.post('/webhook/registration-status', async (req, res) => {
+  console.log('🔄 Received registration status change');
+
+  // Verify signature if configured
+  const signature = req.headers['x-webhook-signature'];
+  if (process.env.JAAREVENT_WEBHOOK_SECRET && !verifySignature(JSON.stringify(req.body), signature)) {
+    console.error('❌ Invalid webhook signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  try {
+    const result = await processStatusChange(req.body);
+    console.log('✅ Status change processed:', JSON.stringify(result));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('❌ Status change error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * Check-in scan webhook (day of event)
+ */
+app.post('/webhook/checkin', async (req, res) => {
+  console.log('📱 Received check-in webhook');
+  try {
+    const result = await processCheckin(req.body);
+    console.log('✅ Check-in processed:', JSON.stringify(result));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('❌ Check-in error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
 
 // Start server
 app.listen(PORT, () => {
