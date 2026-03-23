@@ -14,7 +14,7 @@ import crypto from 'crypto';
 
 const MAILCHIMP_API_KEY = process.env.MAILCHIMP_API_KEY;
 const MAILCHIMP_DC = process.env.MAILCHIMP_DC || 'us11';
-const MAILCHIMP_LIST_ID = process.env.MAILCHIMP_JAAREVENT_LIST_ID || '0e404ef800';
+const MAILCHIMP_LIST_ID = process.env.MAILCHIMP_JAAREVENT_LIST_ID || '67fe159b9d';
 
 const NOTION_SECRET = process.env.NOTION_SECRET;
 const NOTION_CONTACTEN_DS_IDS = (process.env.NOTION_CONTACTEN_DS_IDS || '20811fb08c9e80958d0d000bc8cad8c8,30411fb08c9e8051a530000ba6760e6a').split(',');
