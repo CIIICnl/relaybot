@@ -63,19 +63,21 @@ function apiRequest(url, options = {}) {
 
 /**
  * Update Mailchimp member's JAAREVENT merge field
+ * If addIfMissing is true and member doesn't exist, subscribe them first
  */
-async function updateMailchimpStatus(email, status) {
+async function updateMailchimpStatus(email, status, { addIfMissing = false, firstName = '', lastName = '' } = {}) {
   const emailHash = crypto.createHash('md5').update(email.toLowerCase().trim()).digest('hex');
   const auth = Buffer.from(`anystring:${MAILCHIMP_API_KEY}`).toString('base64');
+  const headers = {
+    'Authorization': `Basic ${auth}`,
+    'Content-Type': 'application/json',
+  };
 
   const result = await apiRequest(
     `https://${MAILCHIMP_DC}.api.mailchimp.com/3.0/lists/${MAILCHIMP_LIST_ID}/members/${emailHash}`,
     {
       method: 'PATCH',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         merge_fields: { JAAREVENT: status },
       }),
@@ -83,9 +85,36 @@ async function updateMailchimpStatus(email, status) {
   );
 
   if (result.status >= 400) {
-    // Member might not exist yet — try adding them
     if (result.status === 404) {
-      console.log(`📬 Member ${email} not in Mailchimp, skipping Mailchimp update`);
+      if (addIfMissing) {
+        // Subscribe the new member with JAAREVENT merge field
+        console.log(`📬 Member ${email} not in Mailchimp, adding as subscriber...`);
+        const addResult = await apiRequest(
+          `https://${MAILCHIMP_DC}.api.mailchimp.com/3.0/lists/${MAILCHIMP_LIST_ID}/members`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              email_address: email.toLowerCase().trim(),
+              status: 'subscribed',
+              merge_fields: {
+                FNAME: firstName,
+                LNAME: lastName,
+                JAAREVENT: status,
+              },
+            }),
+          }
+        );
+
+        if (addResult.status >= 400) {
+          throw new Error(`Mailchimp add error ${addResult.status}: ${JSON.stringify(addResult.data)}`);
+        }
+
+        console.log(`✅ Mailchimp: ${email} added as subscriber with JAAREVENT=${status}`);
+        return addResult.data;
+      }
+
+      console.log(`📬 Member ${email} not in Mailchimp, skipping (no opt-in)`);
       return { skipped: true, reason: 'not_in_list' };
     }
     throw new Error(`Mailchimp error ${result.status}: ${JSON.stringify(result.data)}`);
@@ -166,21 +195,28 @@ async function updateNotionStatus(email, status) {
 export async function processRegistration(body) {
   // GF webhook payload: field values by ID
   // Field 1: First name, 9: Last name, 2: Email, 3: Organisation, 11: Job title
+  // Field 19: Stay informed (checkbox) — opt-in for Mailchimp newsletter
+  // Field 25: Attendance, 26: IX engagement, 21/22: Track choices
   const email = body['2'] || body.email;
   const firstName = body['1'] || body.first_name || '';
   const lastName = body['9'] || body.last_name || '';
+  const stayInformed = !!(body['19'] && body['19'].trim());
 
   if (!email) {
     throw new Error('No email address in registration payload');
   }
 
-  console.log(`📝 Processing registration: ${firstName} ${lastName} <${email}>`);
+  console.log(`📝 Processing registration: ${firstName} ${lastName} <${email}> (opt-in: ${stayInformed})`);
 
-  const results = { email, firstName, lastName };
+  const results = { email, firstName, lastName, stayInformed };
 
-  // Update Mailchimp
+  // Update Mailchimp — only add new subscribers if they opted in
   try {
-    results.mailchimp = await updateMailchimpStatus(email, 'geregistreerd');
+    results.mailchimp = await updateMailchimpStatus(email, 'geregistreerd', {
+      addIfMissing: stayInformed,
+      firstName,
+      lastName,
+    });
   } catch (err) {
     console.error(`Mailchimp error for ${email}:`, err.message);
     results.mailchimpError = err.message;
