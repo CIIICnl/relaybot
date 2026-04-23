@@ -66,6 +66,68 @@ Important:
 
 Return ONLY valid JSON, no markdown formatting or explanation.`;
 
+/**
+ * Parse event from Slack message (different context than email)
+ */
+export async function parseEventFromSlackMessage(messageContent, senderName = null, urlContent = null) {
+  let userMessage = senderName
+    ? `Shared by: ${senderName}\n\n${messageContent}`
+    : messageContent;
+
+  if (urlContent) {
+    userMessage += `\n\n---\nContent from URL:\n${urlContent}`;
+  }
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userMessage }
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+  });
+
+  const content = completion.choices[0].message.content;
+
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    throw new Error(`Failed to parse OpenAI response as JSON: ${content}`);
+  }
+}
+
+/**
+ * Parse newsletter item from Slack message
+ */
+export async function parseNewsletterItemFromSlackMessage(messageContent, senderName = null, urlContent = null) {
+  let userMessage = senderName
+    ? `Shared by: ${senderName}\n\n${messageContent}`
+    : messageContent;
+
+  if (urlContent) {
+    userMessage += `\n\n---\nContent from URL:\n${urlContent}`;
+  }
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    messages: [
+      { role: 'system', content: NEWSLETTER_ITEM_PROMPT },
+      { role: 'user', content: userMessage }
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+  });
+
+  const content = completion.choices[0].message.content;
+
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    throw new Error(`Failed to parse OpenAI response as JSON: ${content}`);
+  }
+}
+
 export async function parseEventFromEmail(emailContent, senderEmail = null) {
   const userMessage = senderEmail
     ? `Email from: ${senderEmail}\n\n${emailContent}`
@@ -200,6 +262,68 @@ export async function fetchUrlContent(url, timeoutMs = 5000) {
   } catch (error) {
     console.log(`⚠️ Error fetching ${url}: ${error.message}`);
     return null;
+  }
+}
+
+const CONTENT_TYPE_DETECTION_PROMPT = `You are an assistant that determines what type of content is being shared.
+
+${CIIIC_CONTEXT}
+
+Analyze the provided content and determine if it's:
+1. An EVENT - something with a specific date/time that people can attend (conference, meetup, workshop, webinar, deadline)
+2. A NEWSLETTER ITEM - an article, news, announcement, funding call, or general information to share
+
+Return JSON with:
+- type: "event" | "newsletter" | "uncertain"
+- confidence: number from 0 to 1 (how confident you are)
+- reason: brief explanation of why you chose this type
+
+Signs of an EVENT:
+- Mentions a specific date/time
+- Words like: "conference", "meetup", "workshop", "webinar", "event", "deadline", "registration", "tickets"
+- Location/venue mentioned
+- "Join us", "Register now", etc.
+
+Signs of a NEWSLETTER ITEM:
+- Article or news content
+- Funding calls, grants, subsidies
+- Product announcements
+- Research findings
+- General information sharing
+
+If confidence is below 0.7, set type to "uncertain".
+
+Return ONLY valid JSON.`;
+
+/**
+ * Detect whether content is an event or newsletter item
+ * @param {string} content - The message content
+ * @param {string|null} urlContent - Optional fetched URL content
+ * @returns {Object} - { type: 'event'|'newsletter'|'uncertain', confidence: number, reason: string }
+ */
+export async function detectContentType(content, urlContent = null) {
+  let userMessage = content;
+
+  if (urlContent) {
+    userMessage += `\n\n---\nContent from URL:\n${urlContent}`;
+  }
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    messages: [
+      { role: 'system', content: CONTENT_TYPE_DETECTION_PROMPT },
+      { role: 'user', content: userMessage }
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+  });
+
+  const result = completion.choices[0].message.content;
+
+  try {
+    return JSON.parse(result);
+  } catch (error) {
+    return { type: 'uncertain', confidence: 0, reason: 'Failed to parse AI response' };
   }
 }
 

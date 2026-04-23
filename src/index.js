@@ -1,25 +1,34 @@
 import 'dotenv/config';
 import express from 'express';
-import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail, extractUrls, fetchUrlContent } from './services/openai.js';
-import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
+import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail, extractUrls, fetchUrlContent, detectContentType, parseEventFromSlackMessage, parseNewsletterItemFromSlackMessage } from './services/openai.js';
+import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion, getWeekNumber, getNextThursday } from './services/notion.js';
 import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, testConnection as testBrevo } from './services/brevo.js';
 import { processRegistration, processStatusChange, processCheckin, verifySignature } from './services/jaarevent.js';
+import * as slack from './services/slack.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Parse JSON and URL-encoded bodies
-app.use(express.json({ limit: '10mb' }));
+// For Slack signature verification, we need to capture the raw body
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'CIIIC Event Automator',
-    description: 'Routes emails by recipient address',
+    service: 'CIIIC Relaybot',
+    description: 'Routes emails and Slack messages to Notion',
     endpoints: {
-      'POST /webhook/email': 'Unified webhook - routes by recipient address',
+      'POST /webhook/email': 'Email webhook - routes by recipient address',
+      'POST /webhook/slack/events': 'Slack events (reactions, mentions)',
+      'POST /webhook/slack/interactions': 'Slack interactions (modals, buttons, shortcuts)',
       'POST /webhook/test': 'Test with raw content (use "to" field for routing)',
       'GET /health': 'Service health check with API status',
     },
@@ -28,14 +37,19 @@ app.get('/', (req, res) => {
       'nieuwsbriefitem@bot.ciiic.nl': 'Creates newsletter items',
       '*@bot.ciiic.nl': 'Catch-all → creates inbox items',
     },
+    slack: {
+      'emoji reaction': 'React with 📌 to add message to Notion (AI auto-detects type)',
+      'message shortcut': 'Right-click → "Add to Notion" for manual type selection',
+    },
   });
 });
 
 // Health check with API connectivity tests
 app.get('/health', async (req, res) => {
-  const [notionStatus, brevoStatus] = await Promise.all([
+  const [notionStatus, brevoStatus, slackStatus] = await Promise.all([
     testNotion(),
     testBrevo(),
+    slack.testConnection(),
   ]);
 
   const healthy = notionStatus.success && brevoStatus.success;
@@ -45,6 +59,7 @@ app.get('/health', async (req, res) => {
     services: {
       notion: notionStatus,
       brevo: brevoStatus,
+      slack: slackStatus,
       openai: {
         configured: !!process.env.OPENAI_API_KEY,
         model: process.env.OPENAI_MODEL || 'gpt-4o',
@@ -193,6 +208,444 @@ app.post('/webhook/test', async (req, res) => {
     });
   }
 });
+
+// ============================================
+// Slack Webhook Endpoints
+// ============================================
+
+// Track processed events to avoid duplicates (Slack retries)
+const processedEvents = new Set();
+
+/**
+ * Slack Events API endpoint
+ * Handles: URL verification, reaction_added events
+ */
+app.post('/webhook/slack/events', async (req, res) => {
+  // Handle URL verification challenge (required for Slack app setup)
+  if (req.body.type === 'url_verification') {
+    console.log('🔗 Slack URL verification');
+    return res.json({ challenge: req.body.challenge });
+  }
+
+  // Verify signature (skip in development if needed)
+  if (process.env.SLACK_SIGNING_SECRET && !slack.verifySlackSignature(req)) {
+    console.error('❌ Invalid Slack signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  // Acknowledge immediately (Slack requires response within 3 seconds)
+  res.status(200).send();
+
+  const event = req.body.event;
+  if (!event) return;
+
+  // Deduplicate events (Slack may retry)
+  const eventId = req.body.event_id;
+  if (processedEvents.has(eventId)) {
+    console.log(`⏭️ Skipping duplicate event: ${eventId}`);
+    return;
+  }
+  processedEvents.add(eventId);
+  // Clean up old events after 5 minutes
+  setTimeout(() => processedEvents.delete(eventId), 5 * 60 * 1000);
+
+  console.log(`📨 Slack event: ${event.type}`);
+
+  try {
+    // Handle 📌 emoji reaction
+    if (event.type === 'reaction_added' && event.reaction === 'pushpin') {
+      await handlePushpinReaction(event);
+    }
+  } catch (error) {
+    console.error('❌ Error handling Slack event:', error);
+  }
+});
+
+/**
+ * Slack Interactions endpoint
+ * Handles: message shortcuts, modal submissions, button clicks
+ */
+app.post('/webhook/slack/interactions', async (req, res) => {
+  // Interactions come as URL-encoded payload
+  let payload;
+  try {
+    payload = JSON.parse(req.body.payload);
+  } catch {
+    return res.status(400).json({ error: 'Invalid payload' });
+  }
+
+  // Verify signature
+  if (process.env.SLACK_SIGNING_SECRET && !slack.verifySlackSignature(req)) {
+    console.error('❌ Invalid Slack signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  console.log(`🎯 Slack interaction: ${payload.type}`);
+
+  try {
+    // Handle message shortcut (right-click → "Add to Notion")
+    if (payload.type === 'message_action' && payload.callback_id === 'add_to_notion') {
+      await handleMessageShortcut(payload, res);
+      return;
+    }
+
+    // Handle modal submission
+    if (payload.type === 'view_submission' && payload.view.callback_id === 'add_to_notion_modal') {
+      await handleModalSubmission(payload, res);
+      return;
+    }
+
+    // Handle button clicks (type selection)
+    if (payload.type === 'block_actions') {
+      await handleButtonClick(payload, res);
+      return;
+    }
+
+    res.status(200).send();
+  } catch (error) {
+    console.error('❌ Error handling Slack interaction:', error);
+    res.status(200).send(); // Always respond 200 to Slack
+  }
+});
+
+/**
+ * Handle 📌 pushpin reaction - auto-detect and create item
+ */
+async function handlePushpinReaction(event) {
+  const { item, user } = event;
+
+  // Only handle message reactions
+  if (item.type !== 'message') return;
+
+  console.log(`📌 Pushpin reaction in channel ${item.channel}`);
+
+  try {
+    // Get the message content
+    const message = await slack.getMessage(item.channel, item.ts);
+    if (!message) {
+      console.error('Could not fetch message');
+      return;
+    }
+
+    // Get user info for the confirmation
+    const userInfo = await slack.getUserInfo(user);
+    const userName = userInfo?.real_name || userInfo?.name || 'Someone';
+
+    // Add processing reaction
+    await slack.addReaction(item.channel, item.ts, 'hourglass_flowing_sand');
+
+    // Extract URLs and fetch content if available
+    const urls = extractUrls(message.text || '');
+    let urlContent = null;
+    if (urls.length > 0) {
+      console.log(`🔗 Fetching URL: ${urls[0]}`);
+      urlContent = await fetchUrlContent(urls[0]);
+    }
+
+    // Detect content type
+    const detection = await detectContentType(message.text || '', urlContent);
+    console.log(`🤖 Detected type: ${detection.type} (confidence: ${detection.confidence})`);
+
+    // If uncertain, ask the user
+    if (detection.type === 'uncertain') {
+      await slack.postMessage(item.channel, {
+        thread_ts: item.ts,
+        blocks: slack.buildTypeSelectionMessage(item.ts, item.channel),
+      });
+      return;
+    }
+
+    // Process based on detected type
+    const result = await processSlackMessage(
+      message.text,
+      detection.type === 'event' ? 'event' : 'newsletter',
+      userName,
+      urlContent
+    );
+
+    // Remove hourglass, add checkmark
+    await slack.addReaction(item.channel, item.ts, 'white_check_mark');
+
+    // Post confirmation in thread
+    await slack.postMessage(item.channel, {
+      thread_ts: item.ts,
+      blocks: slack.buildSuccessMessage({
+        type: result.type,
+        title: result.title,
+        notionUrl: result.notionUrl,
+        details: result.details,
+      }),
+    });
+
+  } catch (error) {
+    console.error('Error processing pushpin reaction:', error);
+
+    // Post error in thread
+    await slack.postMessage(item.channel, {
+      thread_ts: item.ts,
+      blocks: slack.buildErrorMessage(error.message),
+    });
+  }
+}
+
+/**
+ * Handle message shortcut (right-click → "Add to Notion")
+ */
+async function handleMessageShortcut(payload, res) {
+  const message = payload.message;
+  const channel = payload.channel.id;
+  const triggerId = payload.trigger_id;
+
+  // Extract URL from message
+  const urls = extractUrls(message.text || '');
+  const detectedUrl = urls[0] || null;
+
+  // Try to auto-detect type for the dropdown default
+  let suggestedType = 'auto';
+  if (detectedUrl) {
+    const urlContent = await fetchUrlContent(detectedUrl);
+    const detection = await detectContentType(message.text || '', urlContent);
+    if (detection.confidence >= 0.7) {
+      suggestedType = detection.type === 'event' ? 'event' : 'newsletter';
+    }
+  }
+
+  // Open modal
+  await slack.openModal(triggerId, slack.buildAddToNotionModal({
+    messageText: message.text,
+    detectedUrl,
+    suggestedType,
+    channel,
+    messageTs: message.ts,
+  }));
+
+  res.status(200).send();
+}
+
+/**
+ * Handle modal submission
+ */
+async function handleModalSubmission(payload, res) {
+  // Acknowledge immediately
+  res.status(200).send();
+
+  const values = payload.view.state.values;
+  const metadata = JSON.parse(payload.view.private_metadata);
+  const selectedType = values.content_type.content_type_select.selected_option.value;
+
+  const { channel, messageTs } = metadata;
+
+  try {
+    // Get the original message
+    const message = await slack.getMessage(channel, messageTs);
+    if (!message) {
+      throw new Error('Could not fetch original message');
+    }
+
+    // Get user info
+    const userInfo = await slack.getUserInfo(payload.user.id);
+    const userName = userInfo?.real_name || userInfo?.name || 'Someone';
+
+    // Fetch URL content if available
+    const urls = extractUrls(message.text || '');
+    let urlContent = null;
+    if (urls.length > 0) {
+      urlContent = await fetchUrlContent(urls[0]);
+    }
+
+    // Determine type
+    let type = selectedType;
+    if (type === 'auto') {
+      const detection = await detectContentType(message.text || '', urlContent);
+      type = detection.type === 'event' ? 'event' : 'newsletter';
+    }
+
+    // Process the message
+    const result = await processSlackMessage(
+      message.text,
+      type,
+      userName,
+      urlContent
+    );
+
+    // Add checkmark reaction to original message
+    await slack.addReaction(channel, messageTs, 'white_check_mark');
+
+    // Post confirmation in thread
+    await slack.postMessage(channel, {
+      thread_ts: messageTs,
+      blocks: slack.buildSuccessMessage({
+        type: result.type,
+        title: result.title,
+        notionUrl: result.notionUrl,
+        details: result.details,
+      }),
+    });
+
+  } catch (error) {
+    console.error('Error processing modal submission:', error);
+
+    await slack.postMessage(channel, {
+      thread_ts: messageTs,
+      blocks: slack.buildErrorMessage(error.message),
+    });
+  }
+}
+
+/**
+ * Handle button clicks (type selection when AI is uncertain)
+ */
+async function handleButtonClick(payload, res) {
+  res.status(200).send();
+
+  const action = payload.actions[0];
+
+  // Handle cancel
+  if (action.action_id === 'select_type_cancel') {
+    // Delete the selection message
+    await slack.updateMessage(payload.channel.id, payload.message.ts, {
+      text: '❌ Cancelled',
+      blocks: [],
+    });
+    return;
+  }
+
+  // Handle type selection
+  if (action.action_id === 'select_type_event' || action.action_id === 'select_type_newsletter') {
+    const data = JSON.parse(action.value);
+    const { type, channel, messageTs } = data;
+
+    // Update the selection message to show processing
+    await slack.updateMessage(payload.channel.id, payload.message.ts, {
+      blocks: slack.buildProcessingMessage(),
+    });
+
+    try {
+      // Get the original message
+      const message = await slack.getMessage(channel, messageTs);
+      if (!message) {
+        throw new Error('Could not fetch original message');
+      }
+
+      // Get user info
+      const userInfo = await slack.getUserInfo(payload.user.id);
+      const userName = userInfo?.real_name || userInfo?.name || 'Someone';
+
+      // Fetch URL content
+      const urls = extractUrls(message.text || '');
+      let urlContent = null;
+      if (urls.length > 0) {
+        urlContent = await fetchUrlContent(urls[0]);
+      }
+
+      // Process the message
+      const result = await processSlackMessage(
+        message.text,
+        type,
+        userName,
+        urlContent
+      );
+
+      // Add checkmark to original message
+      await slack.addReaction(channel, messageTs, 'white_check_mark');
+
+      // Update selection message with success
+      await slack.updateMessage(payload.channel.id, payload.message.ts, {
+        blocks: slack.buildSuccessMessage({
+          type: result.type,
+          title: result.title,
+          notionUrl: result.notionUrl,
+          details: result.details,
+        }),
+      });
+
+    } catch (error) {
+      console.error('Error processing type selection:', error);
+
+      await slack.updateMessage(payload.channel.id, payload.message.ts, {
+        blocks: slack.buildErrorMessage(error.message),
+      });
+    }
+  }
+}
+
+/**
+ * Process a Slack message and create a Notion item
+ * @param {string} messageText - The message text
+ * @param {string} type - 'event' or 'newsletter'
+ * @param {string} senderName - Name of the person who shared this
+ * @param {string|null} urlContent - Optional fetched URL content
+ * @returns {Object} - { type, title, notionUrl, details }
+ */
+async function processSlackMessage(messageText, type, senderName, urlContent = null) {
+  if (type === 'event') {
+    // Parse as event
+    const eventData = await parseEventFromSlackMessage(messageText, senderName, urlContent);
+
+    if (!eventData.eventName || !eventData.eventDate) {
+      throw new Error('Could not extract event name or date from message');
+    }
+
+    // Create in Notion
+    const notionPage = await createEvent({
+      ...eventData,
+      senderName,
+    });
+
+    // Add comment with Slack context
+    const commentText = `📱 Added via Slack by ${senderName}
+Date: ${new Date().toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam' })}
+${eventData.eventUrl ? `URL: ${eventData.eventUrl}` : ''}`.trim();
+
+    await addComment(notionPage.id, commentText);
+
+    // Send Zapier notification
+    const description = `${senderName} heeft een event gedeeld via Slack: ${eventData.eventName}${eventData.eventDate ? ` op ${eventData.eventDate}` : ''}`;
+    await sendZapierNotification('event', eventData.eventName, description, notionPage.url);
+
+    return {
+      type: 'event',
+      title: eventData.eventName,
+      notionUrl: notionPage.url,
+      details: {
+        eventDate: eventData.eventDate,
+        venue: eventData.venue,
+      },
+    };
+  } else {
+    // Parse as newsletter item
+    const parsedData = await parseNewsletterItemFromSlackMessage(messageText, senderName, urlContent);
+
+    const title = parsedData.title || 'Nieuwsbrief item';
+
+    // Create in Notion
+    const notionPage = await createContentItem({
+      title,
+      beschrijving: parsedData.beschrijving,
+      url: parsedData.url,
+    });
+
+    // Add comment with Slack context
+    const commentText = `📱 Added via Slack by ${senderName}
+Date: ${new Date().toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam' })}
+${parsedData.url ? `URL: ${parsedData.url}` : ''}`.trim();
+
+    await addComment(notionPage.id, commentText);
+
+    // Send Zapier notification
+    const description = `${senderName} heeft een nieuwsbrief item gedeeld via Slack: ${title}`;
+    await sendZapierNotification('newsletter-item', title, description, notionPage.url);
+
+    return {
+      type: 'newsletter',
+      title,
+      notionUrl: notionPage.url,
+      details: {
+        weekNumber: notionPage.weekNumber,
+      },
+    };
+  }
+}
 
 /**
  * Parse inbound email from various service formats
@@ -635,18 +1088,24 @@ app.post('/webhook/checkin', async (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`
-🚀 CIIIC Event Automator running on port ${PORT}
+🚀 CIIIC Relaybot running on port ${PORT}
 
 Endpoints:
-  GET  /              - Service info
-  GET  /health        - Health check with API status
-  POST /webhook/email - Unified webhook (routes by recipient address)
-  POST /webhook/test  - Test with raw content
+  GET  /                         - Service info
+  GET  /health                   - Health check with API status
+  POST /webhook/email            - Email webhook (routes by recipient address)
+  POST /webhook/slack/events     - Slack events (reactions)
+  POST /webhook/slack/interactions - Slack interactions (shortcuts, modals)
+  POST /webhook/test             - Test with raw content
 
 Email routing (all send Zapier notifications):
   events@bot.ciiic.nl          → Calendar events (type: event)
   nieuwsbriefitem@bot.ciiic.nl → Newsletter items (type: newsletter-item)
   *@bot.ciiic.nl               → Inbox catch-all (type: inbox)
+
+Slack:
+  📌 Pushpin reaction           → Auto-detect and add to Notion
+  Right-click → "Add to Notion" → Modal with type selection
 
 Configure your email service to POST all *@bot.ciiic.nl to:
   https://bot.ciiic.nl/webhook/email
