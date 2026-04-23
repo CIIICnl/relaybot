@@ -1,12 +1,18 @@
 import 'dotenv/config';
 import express from 'express';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail, extractUrls, fetchUrlContent } from './services/openai.js';
 import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
-import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, testConnection as testBrevo } from './services/brevo.js';
+import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, sendDraftResumeEmail, testConnection as testBrevo } from './services/brevo.js';
 import { processRegistration, processStatusChange, processCheckin, verifySignature } from './services/jaarevent.js';
+import { initDraftsDb, saveDraft, getDraft, deleteDraft, purgeExpired, healthCheck as draftsHealth } from './services/drafts.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Behind Caddy — trust one hop so req.ip reflects the real client
+app.set('trust proxy', 1);
 
 // Parse JSON and URL-encoded bodies
 app.use(express.json({ limit: '10mb' }));
@@ -21,6 +27,8 @@ app.get('/', (req, res) => {
     endpoints: {
       'POST /webhook/email': 'Unified webhook - routes by recipient address',
       'POST /webhook/test': 'Test with raw content (use "to" field for routing)',
+      'POST /draft/save': 'Save a Publieke Waarden Zelftoets draft and email a resume link',
+      'GET /draft/:token': 'Resume a saved Publieke Waarden Zelftoets draft',
       'GET /health': 'Service health check with API status',
     },
     emailAddresses: {
@@ -49,9 +57,120 @@ app.get('/health', async (req, res) => {
         configured: !!process.env.OPENAI_API_KEY,
         model: process.env.OPENAI_MODEL || 'gpt-4o',
       },
+      drafts: draftsHealth(),
     },
   });
 });
+
+// ============================================
+// Draft-Resume Endpoints (publicvalues.ciiic.nl)
+// ============================================
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const TOKEN_REGEX = /^[A-Za-z0-9_-]{40,50}$/;
+const MAX_DATA_BYTES = 256 * 1024;
+
+const draftRouter = express.Router();
+
+draftRouter.use(cors({
+  origin: ['https://publicvalues.ciiic.nl', 'http://localhost:4321'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+}));
+
+const draftSaveIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: false,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  handler: (req, res) => {
+    res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: 15 * 60 });
+  },
+});
+
+const draftSaveEmailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: false,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.body?.email || '').toLowerCase(),
+  skip: (req) => !req.body?.email,
+  handler: (req, res) => {
+    res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: 60 * 60 });
+  },
+});
+
+draftRouter.post('/save', draftSaveIpLimiter, draftSaveEmailLimiter, async (req, res) => {
+  const { data, email } = req.body || {};
+
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return res.status(400).json({ ok: false, error: 'invalid_data' });
+  }
+
+  let serialised;
+  try {
+    serialised = JSON.stringify(data);
+  } catch {
+    return res.status(400).json({ ok: false, error: 'invalid_data' });
+  }
+
+  if (Buffer.byteLength(serialised, 'utf8') > MAX_DATA_BYTES) {
+    return res.status(413).json({ ok: false, error: 'data_too_large' });
+  }
+
+  if (typeof email !== 'string' || !EMAIL_REGEX.test(email)) {
+    return res.status(400).json({ ok: false, error: 'invalid_email' });
+  }
+
+  const normalisedEmail = email.toLowerCase();
+  const tokenPrefix = (token) => token.slice(0, 6);
+
+  let saved;
+  try {
+    saved = saveDraft({ data, email: normalisedEmail });
+  } catch (error) {
+    console.error('❌ Draft save DB error:', error.message);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+
+  try {
+    await sendDraftResumeEmail(normalisedEmail, saved.token, saved.expiresAt);
+  } catch (error) {
+    console.error('❌ Draft email send failed, rolling back row:', error.message);
+    try {
+      deleteDraft(saved.token);
+    } catch (rollbackError) {
+      console.error('❌ Draft rollback also failed:', rollbackError.message);
+    }
+    return res.status(500).json({ ok: false, error: 'email_send_failed' });
+  }
+
+  console.log(`💾 Draft saved ip=${req.ip} token=${tokenPrefix(saved.token)}… ok`);
+  res.json({ ok: true, expiresAt: saved.expiresAt });
+});
+
+draftRouter.get('/:token', (req, res) => {
+  const { token } = req.params;
+
+  if (!TOKEN_REGEX.test(token)) {
+    return res.status(400).json({ ok: false, error: 'invalid_token' });
+  }
+
+  const draft = getDraft(token);
+  if (!draft) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
+
+  res.json({
+    ok: true,
+    data: draft.data,
+    createdAt: draft.createdAt,
+    expiresAt: draft.expiresAt,
+  });
+});
+
+app.use('/draft', draftRouter);
 
 /**
  * Main webhook endpoint for all inbound emails
@@ -632,6 +751,23 @@ app.post('/webhook/checkin', async (req, res) => {
   }
 });
 
+// Initialise drafts store + schedule purge
+try {
+  const { dbPath } = initDraftsDb();
+  const removed = purgeExpired();
+  console.log(`💾 Drafts DB ready at ${dbPath} (purged ${removed} expired on boot)`);
+  setInterval(() => {
+    try {
+      const n = purgeExpired();
+      if (n > 0) console.log(`🧹 Purged ${n} expired drafts`);
+    } catch (error) {
+      console.error('❌ Drafts purge failed:', error.message);
+    }
+  }, 6 * 60 * 60 * 1000);
+} catch (error) {
+  console.error('❌ Failed to initialise drafts DB:', error.message);
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`
@@ -642,6 +778,8 @@ Endpoints:
   GET  /health        - Health check with API status
   POST /webhook/email - Unified webhook (routes by recipient address)
   POST /webhook/test  - Test with raw content
+  POST /draft/save    - Save a self-assessment draft (emails a resume link)
+  GET  /draft/:token  - Resume a saved draft
 
 Email routing (all send Zapier notifications):
   events@bot.ciiic.nl          → Calendar events (type: event)

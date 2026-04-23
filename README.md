@@ -65,6 +65,23 @@ ZAPIER_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/...
 | `GET /health` | Health check with API status |
 | `POST /webhook/email` | Unified email webhook (routes by recipient) |
 | `POST /webhook/test` | Test with raw JSON (use `to` field for routing) |
+| `POST /draft/save` | Save a Publieke Waarden Zelftoets draft; emails a magic resume link |
+| `GET /draft/:token` | Fetch a saved draft by its token |
+
+## Draft-Resume (Publieke Waarden Zelftoets)
+
+Used by [publicvalues.ciiic.nl](https://publicvalues.ciiic.nl) to let visitors
+save an in-progress self-assessment and resume via an emailed magic link.
+
+- **Retention:** drafts are purged 30 days after creation. The DB lives at
+  `/data/drafts.sqlite` inside the container; mount a Docker volume so the
+  file survives rebuilds (see `docker-compose.yml`).
+- **Auth model:** the token in the emailed link *is* the auth. Anyone with
+  the token can read that draft.
+- **CORS:** only `https://publicvalues.ciiic.nl` and `http://localhost:4321`
+  may call the endpoints.
+- **Rate limits on `POST /draft/save`:** 5 per IP per 15 min, 3 per email
+  per hour.
 
 ## Testing Locally
 

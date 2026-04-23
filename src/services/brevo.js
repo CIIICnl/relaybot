@@ -176,6 +176,78 @@ Dit is een automatisch bericht van de CIIIC Bot.`;
 }
 
 /**
+ * Send draft-resume magic link for the Publieke Waarden Zelftoets
+ */
+export async function sendDraftResumeEmail(recipientEmail, token, expiresAt) {
+  const resumeUrl = `https://publicvalues.ciiic.nl/?draft=${token}`;
+  const expiresDate = new Date(expiresAt).toLocaleDateString('nl-NL', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+
+  const subject = 'Je CIIIC Publieke Waarden Zelftoets — ga later verder';
+
+  const htmlContent = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+  <h2>Ga verder met je zelftoets</h2>
+  <p>Iemand — mogelijk jij — heeft een concept opgeslagen van de CIIIC
+  Publieke Waarden Zelftoets en gevraagd om deze link naar dit e-mailadres
+  te sturen.</p>
+
+  <p>
+    <a href="${resumeUrl}"
+       style="display: inline-block; padding: 10px 20px; background-color: #000; color: #fff; text-decoration: none; border-radius: 4px;">
+      Ga verder met de zelftoets
+    </a>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
+    Deze link is <strong>30 dagen</strong> geldig (tot ${escapeHtml(expiresDate)}) en
+    bevat je ingevulde antwoorden. <strong>Deel deze link niet</strong> —
+    iedereen met deze link kan het concept openen.
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
+    Heb je dit bericht onverwacht ontvangen? Dan kun je het negeren; het
+    concept wordt automatisch verwijderd na 30 dagen.
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+  <p style="color: #999; font-size: 12px;">
+    Dit is een automatisch bericht van CIIIC. Zie ons
+    <a href="https://www.ciiic.nl/privacy-statement">privacy statement</a>
+    voor hoe wij met je gegevens omgaan.
+  </p>
+</body>
+</html>`;
+
+  const textContent = `Ga verder met je zelftoets
+
+Iemand — mogelijk jij — heeft een concept opgeslagen van de CIIIC Publieke Waarden Zelftoets en gevraagd om deze link naar dit e-mailadres te sturen.
+
+Ga verder met de zelftoets: ${resumeUrl}
+
+Deze link is 30 dagen geldig (tot ${expiresDate}) en bevat je ingevulde antwoorden. Deel deze link niet — iedereen met deze link kan het concept openen.
+
+Heb je dit bericht onverwacht ontvangen? Dan kun je het negeren; het concept wordt automatisch verwijderd na 30 dagen.
+
+---
+Dit is een automatisch bericht van CIIIC.
+Privacy statement: https://www.ciiic.nl/privacy-statement`;
+
+  return sendEmail({
+    to: recipientEmail,
+    subject,
+    htmlContent,
+    textContent,
+    fromName: 'CIIIC',
+  });
+}
+
+/**
  * Send error notification email
  */
 export async function sendErrorNotification(recipientEmail, errorMessage) {

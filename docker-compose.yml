@@ -6,8 +6,13 @@ services:
     env_file: .env
     expose:
       - "3000"
+    volumes:
+      - drafts_data:/data
     networks:
       - slidecreator_default
+
+volumes:
+  drafts_data:
 
 networks:
   slidecreator_default:
