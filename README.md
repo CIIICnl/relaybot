@@ -27,22 +27,32 @@ All item types send a webhook to Zapier with:
 
 ## Deploying Updates
 
+**Host:** `slidesbuilder` (Scaleway Paris, hostname resolves only on machines
+with a local alias — use the IP `51.158.116.31` from anywhere else).
+Connects with default SSH identities (1Password agent). Repo is at
+`/opt/relaybot` and runs in Docker.
+
 ```bash
 # 1. Local: commit and push
 cd ~/Github\ NW/ciiic-automator
 git add -A && git commit -m "Description of changes" && git push
 
 # 2. Server: pull and rebuild
-ssh root@slidesbuilder
+ssh root@51.158.116.31   # or 'root@slidesbuilder' if the alias resolves
 cd /opt/relaybot
 git pull
 docker compose up -d --build
 ```
 
-Or use the deploy script from local:
+Or one-shot from local:
 ```bash
-ssh root@slidesbuilder 'cd /opt/relaybot && git pull && docker compose up -d --build'
+ssh root@51.158.116.31 'cd /opt/relaybot && git pull && docker compose up -d --build'
 ```
+
+**Never hand-edit files on the server.** On 2026-04-14 a `jaarevent.js`
+hotfix was applied in-place and the uncommitted change blocked a later
+`git pull`. If a live patch is unavoidable, mirror the change in this
+repo and push before the next deploy.
 
 ## Environment Variables
 
