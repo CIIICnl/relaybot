@@ -145,7 +145,7 @@ async function updateNotionStatus(email, status) {
         headers,
         body: JSON.stringify({
           filter: {
-            property: '',  // unnamed email property
+            property: 'emailadres',
             email: { equals: email.toLowerCase().trim() },
           },
           page_size: 1,
