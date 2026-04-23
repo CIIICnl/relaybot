@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEmail, extractUrls, fetchUrlContent } from './services/openai.js';
 import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
 import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, sendDraftResumeEmail, testConnection as testBrevo } from './services/brevo.js';
@@ -83,7 +83,7 @@ const draftSaveIpLimiter = rateLimit({
   max: 5,
   standardHeaders: false,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip,
+  keyGenerator: (req) => ipKeyGenerator(req.ip),
   handler: (req, res) => {
     res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: 15 * 60 });
   },
