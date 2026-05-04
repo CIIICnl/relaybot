@@ -6,6 +6,7 @@ import { parseEventFromEmail, parseNewsletterItemFromEmail, parseInboxItemFromEm
 import { createEvent, createContentItem, createInboxItem, addComment, testConnection as testNotion } from './services/notion.js';
 import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotification, sendDraftResumeEmail, testConnection as testBrevo } from './services/brevo.js';
 import { processRegistration, processStatusChange, processCheckin, verifySignature } from './services/jaarevent.js';
+import { processSxswSubmission } from './services/sxsw.js';
 import { initDraftsDb, saveDraft, getDraft, deleteDraft, purgeExpired, healthCheck as draftsHealth } from './services/drafts.js';
 
 const app = express();
@@ -732,6 +733,22 @@ app.post('/webhook/registration-status', async (req, res) => {
     res.json({ success: true, ...result });
   } catch (err) {
     console.error('❌ Status change error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * SXSW London 2026 newsletter opt-in webhook (Forms 26 + 27)
+ * Subscribes opted-in registrants to the main CIIIC Mailchimp list.
+ */
+app.post('/webhook/sxsw-newsletter', async (req, res) => {
+  console.log('📝 Received SXSW webhook');
+  try {
+    const result = await processSxswSubmission(req.body);
+    console.log('✅ SXSW processed:', JSON.stringify(result));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('❌ SXSW error:', err.message);
     res.status(400).json({ error: err.message });
   }
 });
