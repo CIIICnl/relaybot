@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
@@ -8,6 +9,7 @@ import { sendEventConfirmation, sendNewsletterItemConfirmation, sendErrorNotific
 import { processRegistration, processStatusChange, processCheckin, verifySignature } from './services/jaarevent.js';
 import { processSxswSubmission } from './services/sxsw.js';
 import { initDraftsDb, saveDraft, getDraft, deleteDraft, purgeExpired, healthCheck as draftsHealth } from './services/drafts.js';
+import { createTicket, testConnection as testIntake, TICKET_TYPES, TICKET_SYSTEMS, TICKET_PRIORITIES } from './services/intake.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,6 +32,7 @@ app.get('/', (req, res) => {
       'POST /webhook/test': 'Test with raw content (use "to" field for routing)',
       'POST /draft/save': 'Save a Publieke Waarden Zelftoets draft and email a resume link',
       'GET /draft/:token': 'Resume a saved Publieke Waarden Zelftoets draft',
+      'POST /intake/ticket': 'Create a Notion ticket from the chatbot (bearer auth)',
       'GET /health': 'Service health check with API status',
     },
     emailAddresses: {
@@ -42,9 +45,10 @@ app.get('/', (req, res) => {
 
 // Health check with API connectivity tests
 app.get('/health', async (req, res) => {
-  const [notionStatus, brevoStatus] = await Promise.all([
+  const [notionStatus, brevoStatus, intakeStatus] = await Promise.all([
     testNotion(),
     testBrevo(),
+    testIntake(),
   ]);
 
   const healthy = notionStatus.success && brevoStatus.success;
@@ -54,6 +58,7 @@ app.get('/health', async (req, res) => {
     services: {
       notion: notionStatus,
       brevo: brevoStatus,
+      intake: { ...intakeStatus, configured: !!process.env.INTAKE_TOKEN },
       openai: {
         configured: !!process.env.OPENAI_API_KEY,
         model: process.env.OPENAI_MODEL || 'gpt-4o',
@@ -172,6 +177,93 @@ draftRouter.get('/:token', (req, res) => {
 });
 
 app.use('/draft', draftRouter);
+
+// ============================================
+// Intake Ticket Endpoint (chatbot → Notion)
+// ============================================
+//
+// Lets ciiicbot (ai.ciiic.nl) log a user's request as a ticket in the Notion
+// database "Website 2026 bugs & doorontwikkeling". Auth is a shared bearer
+// secret (INTAKE_TOKEN); the Notion token stays server-side.
+
+/**
+ * Constant-time bearer-token check against INTAKE_TOKEN.
+ */
+function requireIntakeToken(req, res, next) {
+  const expected = process.env.INTAKE_TOKEN;
+  if (!expected) {
+    console.error('❌ INTAKE_TOKEN not configured — /intake/ticket disabled');
+    return res.status(503).json({ ok: false, error: 'intake_not_configured' });
+  }
+
+  const header = req.headers.authorization || '';
+  const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
+
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  const ok = a.length === b.length && timingSafeEqual(a, b);
+  if (!ok) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
+  next();
+}
+
+app.post('/intake/ticket', requireIntakeToken, async (req, res) => {
+  const body = req.body || {};
+  const issue = typeof body.issue === 'string' ? body.issue.trim() : '';
+  const beschrijving = typeof body.beschrijving === 'string' ? body.beschrijving.trim() : '';
+
+  if (!issue) {
+    return res.status(400).json({ ok: false, error: 'missing_field', field: 'issue' });
+  }
+  if (!beschrijving) {
+    return res.status(400).json({ ok: false, error: 'missing_field', field: 'beschrijving' });
+  }
+
+  // Optional select fields: validate against the allowed sets when provided.
+  const type = body.type == null || body.type === '' ? undefined : String(body.type);
+  if (type && !TICKET_TYPES.includes(type)) {
+    return res.status(400).json({ ok: false, error: 'invalid_value', field: 'type', allowed: TICKET_TYPES });
+  }
+
+  const systeem = body.systeem == null || body.systeem === '' ? undefined : String(body.systeem);
+  if (systeem && !TICKET_SYSTEMS.includes(systeem)) {
+    return res.status(400).json({ ok: false, error: 'invalid_value', field: 'systeem', allowed: TICKET_SYSTEMS });
+  }
+
+  const prioriteit = body.prioriteit == null || body.prioriteit === '' ? undefined : String(body.prioriteit);
+  if (prioriteit && !TICKET_PRIORITIES.includes(prioriteit)) {
+    return res.status(400).json({ ok: false, error: 'invalid_value', field: 'prioriteit', allowed: TICKET_PRIORITIES });
+  }
+
+  const url = typeof body.url === 'string' && body.url.trim() ? body.url.trim() : undefined;
+
+  try {
+    const result = await createTicket({
+      issue,
+      beschrijving,
+      type,
+      systeem,
+      prioriteit,
+      url,
+      indiener_email: body.indiener_email,
+      indiener_naam: body.indiener_naam,
+    });
+
+    console.log(`🎫 Intake ticket created: ${result.url} (ingediendDoor resolved=${result.ingediendDoorResolved})`);
+    return res.json({
+      ok: true,
+      success: true,
+      notionUrl: result.url,
+      ticketId: result.id,
+      ingediendDoorResolved: result.ingediendDoorResolved,
+    });
+  } catch (error) {
+    console.error('❌ Intake ticket error:', error.message);
+    return res.status(500).json({ ok: false, error: 'internal_error', message: error.message });
+  }
+});
 
 /**
  * Main webhook endpoint for all inbound emails
@@ -797,6 +889,7 @@ Endpoints:
   POST /webhook/test  - Test with raw content
   POST /draft/save    - Save a self-assessment draft (emails a resume link)
   GET  /draft/:token  - Resume a saved draft
+  POST /intake/ticket - Create a Notion ticket from the chatbot (bearer auth)
 
 Email routing (all send Zapier notifications):
   events@bot.ciiic.nl          → Calendar events (type: event)

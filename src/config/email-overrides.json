@@ -1,0 +1,6 @@
+{
+  "_comment": "Intake identity overrides. Maps the e-mail a person uses in the chatbot (key) to the e-mail that person has on their Notion account (value), so 'Ingediend door' resolves to the right Notion user. Keys and values are matched case-insensitively. Entries whose key starts with '_' are ignored (they are docs/examples).",
+  "_example": "someone@ciiic.nl: someone-notion@example.com",
+  "_heleen_note": "Heleen sits on Notion with a Gmail address (historical) but may log in to the chatbot with a CIIIC address. Replace BOTH sides of the entry below with the real addresses. Until then this entry is inert (the placeholder value matches no Notion user, so resolution just falls through and the ticket is still created).",
+  "REPLACE_WITH_HELEEN_CHATBOT_EMAIL@ciiic.nl": "REPLACE_WITH_HELEEN_NOTION_GMAIL@gmail.com"
+}
