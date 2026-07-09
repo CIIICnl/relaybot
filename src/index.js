@@ -10,6 +10,7 @@ import { processRegistration, processStatusChange, processCheckin, verifySignatu
 import { processSxswSubmission } from './services/sxsw.js';
 import { initDraftsDb, saveDraft, getDraft, deleteDraft, purgeExpired, healthCheck as draftsHealth } from './services/drafts.js';
 import { createTicket, testConnection as testIntake, TICKET_TYPES, TICKET_SYSTEMS, TICKET_PRIORITIES } from './services/intake.js';
+import { runRadarScan, startRadarScheduler, radarHealth } from './services/radar/index.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -59,6 +60,7 @@ app.get('/health', async (req, res) => {
       notion: notionStatus,
       brevo: brevoStatus,
       intake: { ...intakeStatus, configured: !!process.env.INTAKE_TOKEN },
+      radar: { ...radarHealth(), configured: !!process.env.RADAR_INGEST_SECRET },
       openai: {
         configured: !!process.env.OPENAI_API_KEY,
         model: process.env.OPENAI_MODEL || 'gpt-4o',
@@ -261,6 +263,38 @@ app.post('/intake/ticket', requireIntakeToken, async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Intake ticket error:', error.message);
+    return res.status(500).json({ ok: false, error: 'internal_error', message: error.message });
+  }
+});
+
+/**
+ * Constant-time bearer-token check against RADAR_INGEST_SECRET (radar admin ops).
+ */
+function requireRadarToken(req, res, next) {
+  const expected = process.env.RADAR_INGEST_SECRET;
+  if (!expected) {
+    return res.status(503).json({ ok: false, error: 'radar_not_configured' });
+  }
+  const header = req.headers.authorization || '';
+  const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  const ok = a.length === b.length && timingSafeEqual(a, b);
+  if (!ok) return res.status(401).json({ ok: false, error: 'unauthorized' });
+  next();
+}
+
+// Manually trigger a radar scan (the scheduler runs it daily). Bearer-gated.
+//   ?dryRun=1  extract + dedup but do not POST or advance watermarks
+//   ?only=xrmust  restrict to one source
+app.post('/radar/scan', requireRadarToken, async (req, res) => {
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+  const only = typeof req.query.only === 'string' ? req.query.only : null;
+  try {
+    const result = await runRadarScan({ dryRun, only });
+    return res.json(result);
+  } catch (error) {
+    console.error('❌ Radar scan error:', error.message);
     return res.status(500).json({ ok: false, error: 'internal_error', message: error.message });
   }
 });
@@ -877,6 +911,17 @@ try {
   console.error('❌ Failed to initialise drafts DB:', error.message);
 }
 
+// Radar signals — daily scan of the source allowlist → monitor ingest endpoint.
+if (process.env.RADAR_INGEST_SECRET) {
+  try {
+    startRadarScheduler();
+  } catch (error) {
+    console.error('❌ Failed to start radar scheduler:', error.message);
+  }
+} else {
+  console.log('📡 Radar scheduler disabled (RADAR_INGEST_SECRET not set)');
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`
@@ -890,6 +935,7 @@ Endpoints:
   POST /draft/save    - Save a self-assessment draft (emails a resume link)
   GET  /draft/:token  - Resume a saved draft
   POST /intake/ticket - Create a Notion ticket from the chatbot (bearer auth)
+  POST /radar/scan    - Trigger a radar source scan → monitor ingest (bearer auth)
 
 Email routing (all send Zapier notifications):
   events@bot.ciiic.nl          → Calendar events (type: event)

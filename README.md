@@ -27,32 +27,27 @@ All item types send a webhook to Zapier with:
 
 ## Deploying Updates
 
-**Host:** `slidesbuilder` (Scaleway Paris, hostname resolves only on machines
-with a local alias — use the IP `51.158.116.31` from anywhere else).
-Connects with default SSH identities (1Password agent). Repo is at
-`/opt/relaybot` and runs in Docker.
+**Host:** `bot.ciiic.nl` runs as the Coolify app **`relaybot`** on
+`ciiic-coolify` (`51.15.131.87`), managed at `https://coolify.ciiic.nl`.
+Coolify **auto-deploys on every push to `main`** — there is no manual
+SSH/rebuild step.
 
 ```bash
-# 1. Local: commit and push
+# Commit and push — Coolify redeploys relaybot on push to main
 cd ~/Github\ NW/ciiic-automator
 git add -A && git commit -m "Description of changes" && git push
-
-# 2. Server: pull and rebuild
-ssh root@51.158.116.31   # or 'root@slidesbuilder' if the alias resolves
-cd /opt/relaybot
-git pull
-docker compose up -d --build
 ```
 
-Or one-shot from local:
-```bash
-ssh root@51.158.116.31 'cd /opt/relaybot && git pull && docker compose up -d --build'
-```
+Verify live via `https://bot.ciiic.nl/health`.
 
-**Never hand-edit files on the server.** On 2026-04-14 a `jaarevent.js`
-hotfix was applied in-place and the uncommitted change blocked a later
-`git pull`. If a live patch is unavoidable, mirror the change in this
-repo and push before the next deploy.
+**Secrets / env vars** are set in the Coolify dashboard (relaybot app →
+Environment Variables), then **Redeploy** — not in a `.env` file on a server.
+
+> ⚠️ **Ignore `51.158.116.31 /opt/relaybot`.** That box (Scaleway Paris,
+> hostname `slidesbuilder`) is only a Caddy front proxy that forwards
+> `bot.ciiic.nl` on to the Coolify host. Its local `ciiic-automator` container
+> is stale and receives no production traffic — deploying there does nothing for
+> prod. (Verified 2026-07-09; the old manual-Docker flow lived here.)
 
 ## Environment Variables
 
@@ -78,6 +73,7 @@ ZAPIER_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/...
 | `POST /draft/save` | Save a Publieke Waarden Zelftoets draft; emails a magic resume link |
 | `GET /draft/:token` | Fetch a saved draft by its token |
 | `POST /intake/ticket` | Create a Notion ticket from the chatbot (bearer auth) |
+| `POST /radar/scan` | Trigger a radar source scan → monitor ingest (bearer auth; `?dryRun=1`, `?only=`) |
 
 ## Draft-Resume (Publieke Waarden Zelftoets)
 
@@ -171,6 +167,41 @@ INTAKE_EMAIL_OVERRIDES={"heleen@ciiic.nl":"heleen.private@gmail.com"}
 
 > The relay's Notion integration (`NOTION_SECRET`) must be granted access to the
 > bugs database in Notion (share the DB → Connections → add the integration).
+
+## Radar Signals (source scan → monitor)
+
+The relay scans a small allowlist of immersive/XR event sources daily, extracts
+event candidates with an LLM, dedups them, and POSTs them to the **monitor**
+Radar ingest endpoint (`POST monitor.ciiic.nl/api/radar/ingest`). Monitor owns the
+`monitor_signals` store and the promote-to-Notion action; **the relay never writes
+to the Event Calendar here.** See `docs/radar-source-recon-2026-07-09.md` for the
+per-source feed reality and `src/services/radar/`.
+
+**v1 sources** (machine-readable first — verified live):
+
+| Source | Method | Status |
+|--------|--------|--------|
+| XRMust XR Agenda | WP REST API (`/wp-json/wp/v2/all-events`, incremental via `orderby=modified`) + per-event page fetch for the date | ✅ on |
+| Immersive Filmmaking Calendar | Google Sheet CSV export (first tab) | ✅ on |
+| Immersive Wire | beehiiv RSS | ⏸️ off in v1 — feed works, but digest issues yield noisy single-event extraction; needs a multi-event extractor (phase 1b). Enable with `RADAR_ENABLE_IMMERSIVEWIRE=1`. |
+
+**Pipeline:** scan (incremental, watermark per source) → LLM extract + relevance
+score (0-100, NL/public-values weighted) → drop below `RADAR_RELEVANCE_FLOOR`,
+already-in-Event-Calendar, or unchanged-since-last-post → batch POST to monitor.
+State (watermarks + seen dedup_keys) lives in `/data/radar.sqlite`.
+
+**Schedule:** daily at `RADAR_SCAN_HOUR` (Europe/Amsterdam, default 07:00), plus a
+manual trigger:
+
+```bash
+# dry-run (extract + dedup, no POST, no watermark advance); ?only= restricts to one source
+curl -X POST "https://bot.ciiic.nl/radar/scan?dryRun=1&only=xrmust" \
+  -H "Authorization: Bearer $RADAR_INGEST_SECRET"
+```
+
+**Env:** `RADAR_INGEST_SECRET` (shared with monitor) enables the scheduler and
+endpoint; see `.env.example` for the optional tuning knobs. `/health` reports
+`radar.configured`.
 
 ## Testing Locally
 
