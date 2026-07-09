@@ -287,11 +287,13 @@ function requireRadarToken(req, res, next) {
 // Manually trigger a radar scan (the scheduler runs it daily). Bearer-gated.
 //   ?dryRun=1  extract + dedup but do not POST or advance watermarks
 //   ?only=xrmust  restrict to one source
+//   ?type=research|funding|event  restrict to one signal type
 app.post('/radar/scan', requireRadarToken, async (req, res) => {
   const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
   const only = typeof req.query.only === 'string' ? req.query.only : null;
+  const type = typeof req.query.type === 'string' ? req.query.type : null;
   try {
-    const result = await runRadarScan({ dryRun, only });
+    const result = await runRadarScan({ dryRun, only, type });
     return res.json(result);
   } catch (error) {
     console.error('❌ Radar scan error:', error.message);

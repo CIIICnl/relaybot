@@ -49,6 +49,27 @@ export function normalizeDedupKey({ canonicalUrl, url, title, eventDate }) {
 }
 
 /**
+ * Dedup key exactly as the monitor seed derives it (monitor/scripts/seed-radar.mjs
+ * → dedupKey()): lowercase the whole URL, strip protocol, strip trailing slashes,
+ * strip query/fragment. Keeping this byte-identical to the seed is what lets the
+ * daily research/funding scan land on already-seeded rows (re-ingest just bumps
+ * last_seen_at) instead of minting duplicates. Do NOT "improve" it (e.g. strip
+ * www or lowercase only the host, like normalizeUrl above) without changing the
+ * seed in lockstep. Falls back to `source:title` like the seed does.
+ */
+export function seedDedupKey({ url, source, title }) {
+  if (url && String(url).trim()) {
+    return String(url)
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '')
+      .replace(/[?#].*$/, '');
+  }
+  return `${source}:${title}`.toLowerCase().replace(/\s+/g, '-').slice(0, 200);
+}
+
+/**
  * Load a Set of normalized keys for events already in the Notion Event Calendar.
  * Keys: slug(title) and slug(title)|YYYY. Best-effort; on any error returns an
  * empty set so dedup simply doesn't filter (candidates still flow to monitor,

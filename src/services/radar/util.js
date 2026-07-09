@@ -62,11 +62,22 @@ export function parseRss(xml) {
       title: stripHtml(pick('title') || ''),
       link: link || null,
       guid: pick('guid') || pick('id') || link || null,
-      pubDate: pick('pubDate') || pick('updated') || pick('published') || null,
+      pubDate: pick('pubDate') || pick('updated') || pick('published') || pick('dc:date') || pick('prism:publicationDate') || null,
       content: pick('content:encoded') || pick('content') || pick('description') || pick('summary') || '',
     });
   }
   return items;
+}
+
+/** Best-effort parse of an RSS/Atom/ISO date string to YYYY-MM-DD, or null. */
+export function toIsoDate(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
 }
 
 /** Parse CSV text into an array of string arrays (handles quotes + embedded commas/newlines). */

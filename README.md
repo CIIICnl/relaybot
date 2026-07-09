@@ -170,32 +170,48 @@ INTAKE_EMAIL_OVERRIDES={"heleen@ciiic.nl":"heleen.private@gmail.com"}
 
 ## Radar Signals (source scan → monitor)
 
-The relay scans a small allowlist of immersive/XR event sources daily, extracts
-event candidates with an LLM, dedups them, and POSTs them to the **monitor**
-Radar ingest endpoint (`POST monitor.ciiic.nl/api/radar/ingest`). Monitor owns the
-`monitor_signals` store and the promote-to-Notion action; **the relay never writes
-to the Event Calendar here.** See `docs/radar-source-recon-2026-07-09.md` for the
-per-source feed reality and `src/services/radar/`.
+The relay scans a small allowlist of immersive/XR sources daily, extracts
+candidates with an LLM, dedups them, and POSTs them to the **monitor** Radar
+ingest endpoint (`POST monitor.ciiic.nl/api/radar/ingest`) with a `type` of
+`event`, `research` or `funding`. Monitor owns the `monitor_signals` store and the
+promote-to-Notion action; **the relay never writes to Notion here.** See
+`docs/radar-source-recon-2026-07-09.md` (events) and
+`docs/radar-fase2-recon-2026-07-09.md` (research + funding) for per-source feed
+reality, and `src/services/radar/`.
 
-**v1 sources** (machine-readable first — verified live):
+**Sources** (machine-readable first — verified live). Scrape / newsletter-LLM
+sources are scaffolded off behind flags until hardened (see the recon docs).
 
-| Source | Method | Status |
-|--------|--------|--------|
-| XRMust XR Agenda | WP REST API (`/wp-json/wp/v2/all-events`, incremental via `orderby=modified`) + per-event page fetch for the date | ✅ on |
-| Immersive Filmmaking Calendar | Google Sheet CSV export (first tab) | ✅ on |
-| Immersive Wire | beehiiv RSS | ⏸️ off in v1 — feed works, but digest issues yield noisy single-event extraction; needs a multi-event extractor (phase 1b). Enable with `RADAR_ENABLE_IMMERSIVEWIRE=1`. |
+| Type | Source | Method | Status |
+|------|--------|--------|--------|
+| event | XRMust XR Agenda | WP REST API + per-event page fetch | ✅ on |
+| event | Immersive Filmmaking Calendar | Google Sheet CSV | ✅ on |
+| event | Immersive Wire | beehiiv RSS | ⏸️ off (`RADAR_ENABLE_IMMERSIVEWIRE=1`) |
+| research | arXiv cs.HC + cs.GR | Atom API | ✅ on |
+| research | Frontiers in VR, Elsevier C&G | RSS | ✅ on |
+| research | Springer VR, Nature Scientific Reports | RSS | ⏸️ off — block server-side fetch with a JS challenge; need a headless/proxy fetch (`RADAR_ENABLE_SPRINGER=1`/`RADAR_ENABLE_NATURE=1`) |
+| research | EurekAlert, Immerse, Voices of VR | RSS / newsletter | ⏸️ off (phase 2b) |
+| funding | EU Funding & Tenders | SEDIA search-API | ✅ on (`eu-sedia`) |
+| funding | national funds (Filmfonds, CNC, Medienboard, …) | page-scrape | ⏸️ off (phase 2b) |
 
-**Pipeline:** scan (incremental, watermark per source) → LLM extract + relevance
-score (0-100, NL/public-values weighted) → drop below `RADAR_RELEVANCE_FLOOR`,
-already-in-Event-Calendar, or unchanged-since-last-post → batch POST to monitor.
-State (watermarks + seen dedup_keys) lives in `/data/radar.sqlite`.
+**Date semantics per type:** event → start date; research → publication date;
+funding → **deadline** (with `extra.status` = open/closed/upcoming).
+
+**Pipeline:** scan (incremental, watermark per source) → type-specific LLM extract +
+relevance score (0-100, NL/public-values weighted) → drop below
+`RADAR_RELEVANCE_FLOOR`, already-in-Event-Calendar (events only), or
+unchanged-since-last-post → batch POST to monitor → per-source scan-health POST to
+`/api/radar/scan-report`. `dedup_key` follows the monitor seed convention (normalized
+canonical URL) so daily scans land on already-seeded rows. State (watermarks + seen
+dedup_keys) lives in `/data/radar.sqlite`.
 
 **Schedule:** daily at `RADAR_SCAN_HOUR` (Europe/Amsterdam, default 07:00), plus a
 manual trigger:
 
 ```bash
-# dry-run (extract + dedup, no POST, no watermark advance); ?only= restricts to one source
-curl -X POST "https://bot.ciiic.nl/radar/scan?dryRun=1&only=xrmust" \
+# dry-run (extract + dedup, no POST, no watermark advance)
+# ?only= restricts to one source; ?type=research|funding|event restricts to one type
+curl -X POST "https://bot.ciiic.nl/radar/scan?dryRun=1&type=funding" \
   -H "Authorization: Bearer $RADAR_INGEST_SECRET"
 ```
 

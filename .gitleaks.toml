@@ -1,0 +1,11 @@
+# gitleaks config for ciiic-automator.
+# Keeps the full default ruleset; adds a narrow allowlist for known false
+# positives so the pre-commit hook doesn't block on non-secrets.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Radar funding source-key literals (public EU programme keys, not secrets)"
+regexes = [
+  '''(horizon-cl2-culture|horizon-virtual-worlds|creative-europe-media|creative-europe-culture|new-european-bauhaus)''',
+]

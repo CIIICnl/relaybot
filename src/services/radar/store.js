@@ -27,6 +27,7 @@ let stmtUpsertSeen = null;
 let stmtCountSeen = null;
 
 export function initRadarDb() {
+  if (db) return { dbPath: DB_PATH }; // idempotent — one handle per process
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
