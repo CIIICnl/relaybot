@@ -201,9 +201,15 @@ funding → **deadline** (with `extra.status` = open/closed/upcoming).
 relevance score (0-100, NL/public-values weighted) → drop below
 `RADAR_RELEVANCE_FLOOR`, already-in-Event-Calendar (events only), or
 unchanged-since-last-post → batch POST to monitor → per-source scan-health POST to
-`/api/radar/scan-report`. `dedup_key` follows the monitor seed convention (normalized
-canonical URL) so daily scans land on already-seeded rows. State (watermarks + seen
-dedup_keys) lives in `/data/radar.sqlite`.
+`/api/radar/scan-report` → Slack digest of brand-new items. `dedup_key` follows the
+monitor seed convention (normalized canonical URL) so daily scans land on
+already-seeded rows. State (watermarks + seen dedup_keys) lives in `/data/radar.sqlite`.
+
+**Slack digest:** after each scan the relay posts the brand-new signals (dedup_key
+never seen before, so no re-notifies) to `RADAR_SLACK_CHANNEL` (default
+`#team-ciiic`) via the existing `SLACK_BOT_TOKEN`, deep-linking to the monitor
+inbox. The first run primes silently so the backfill doesn't flood the channel;
+set `RADAR_SLACK_DIGEST=0` to disable. The bot must be invited to the channel.
 
 **Schedule:** daily at `RADAR_SCAN_HOUR` (Europe/Amsterdam, default 07:00), plus a
 manual trigger:

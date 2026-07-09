@@ -26,11 +26,14 @@ import {
   initRadarDb,
   getWatermark,
   setWatermark,
-  isUnchanged,
+  seenState,
+  isSlackPrimed,
+  setSlackPrimed,
   markPosted,
   hashContent,
   radarHealth,
 } from './store.js';
+import { postRadarDigest } from './slack.js';
 import { extractEvent, extractResearch, extractFunding, extractNews } from './extract.js';
 import {
   normalizeDedupKey,
@@ -217,9 +220,11 @@ export async function runRadarScan({ dryRun = false, only = null, type = null } 
         if (!signal) { stats.skipped++; continue; }
 
         const contentHash = hashContent(signal);
-        if (isUnchanged(signal.dedup_key, contentHash)) { stats.skipped++; continue; }
+        const state = seenState(signal.dedup_key, contentHash);
+        if (state === 'unchanged') { stats.skipped++; continue; }
 
         signal.__hash = contentHash;
+        signal.__fresh = state === 'new'; // brand-new dedup_key → eligible for the Slack digest
         signals.push(signal);
         stats.queued++;
       }
@@ -234,9 +239,21 @@ export async function runRadarScan({ dryRun = false, only = null, type = null } 
 
   let ingest = null;
   if (signals.length && !dryRun) {
-    const payload = signals.map(({ __hash, ...s }) => s);
+    const payload = signals.map(({ __hash, __fresh, ...s }) => s);
     ingest = await postSignals(payload);
     for (const s of signals) markPosted(s.dedup_key, s.source, s.__hash);
+
+    // Slack digest of brand-new items (best-effort). Prime silently on the first
+    // run so the research/funding/news backfill doesn't flood the channel.
+    const fresh = signals.filter((s) => s.__fresh);
+    if (!isSlackPrimed()) {
+      setSlackPrimed();
+      if (fresh.length) {
+        console.log(`📮 Radar Slack digest primed (${fresh.length} new items suppressed on first run)`);
+      }
+    } else if (fresh.length) {
+      await postRadarDigest(fresh);
+    }
   }
 
   // Scan-health telemetry (best-effort; never fails the scan). Keyed by scanner.

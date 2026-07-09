@@ -94,6 +94,34 @@ export function isUnchanged(dedupKey, contentHash) {
   return stmtGetSeen.get(dedupKey)?.content_hash === contentHash;
 }
 
+/**
+ * Classify a candidate against the seen-store, for the Slack digest:
+ *   'new'       — dedup_key never seen before (worth announcing)
+ *   'changed'   — seen before, but content changed (an update, not announced)
+ *   'unchanged' — seen before with the same content (skipped entirely)
+ */
+export function seenState(dedupKey, contentHash) {
+  ensureReady();
+  const row = stmtGetSeen.get(dedupKey);
+  if (!row) return 'new';
+  return row.content_hash === contentHash ? 'unchanged' : 'changed';
+}
+
+/**
+ * One-time priming flag (stored as a pseudo-watermark) so the first scan after
+ * enabling the digest doesn't dump the whole research/funding/news backfill into
+ * Slack. First run primes silently; subsequent runs post normally.
+ */
+const SLACK_PRIMED_KEY = '__radar_slack_primed__';
+export function isSlackPrimed() {
+  ensureReady();
+  return getWatermark(SLACK_PRIMED_KEY) === '1';
+}
+export function setSlackPrimed() {
+  ensureReady();
+  setWatermark(SLACK_PRIMED_KEY, '1');
+}
+
 export function markPosted(dedupKey, source, contentHash) {
   ensureReady();
   stmtUpsertSeen.run({
