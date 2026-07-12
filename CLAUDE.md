@@ -13,7 +13,7 @@ Node/Express relay service deployed as **`bot.ciiic.nl`**. Two jobs:
   managed at `https://coolify.ciiic.nl`. This is what actually serves
   `bot.ciiic.nl`.
 - **Runs as:** a Coolify-managed Docker container behind Caddy.
-- **Upstream repo:** `CIIICnl/relaybot`
+- **Upstream repo:** `CIIICnl/ciiic-automator` (hernoemd van `relaybot`, 2026-07-12)
 - **Deploy trigger:** push to `main` → Coolify auto-deploys. No manual step.
 - **Secrets/env:** set in the Coolify UI (relaybot app → Environment Variables),
   **not** in a `.env` file on a server.

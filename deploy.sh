@@ -10,7 +10,7 @@ if [ -d "/opt/relaybot" ]; then
   git pull
 else
   echo "📥 Cloning repository..."
-  git clone https://github.com/CIIICnl/relaybot.git /opt/relaybot
+  git clone https://github.com/CIIICnl/ciiic-automator.git /opt/relaybot
   cd /opt/relaybot
 fi
 
